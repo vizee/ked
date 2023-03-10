@@ -50,10 +50,17 @@ type Event struct {
 }
 
 type Watcher struct {
-	ev            chan Event
+	events        chan Event
 	deployTimeout time.Duration
 	checkInterval time.Duration
 	recvEvent     int
+}
+
+func (w *Watcher) postEvent(ctx context.Context, ev Event) {
+	select {
+	case w.events <- ev:
+	case <-ctx.Done():
+	}
 }
 
 func (w *Watcher) watchDeploymentStatus(op *Operator, deployment *unstructured.Unstructured) {
@@ -85,11 +92,11 @@ func (w *Watcher) watchDeploymentStatus(op *Operator, deployment *unstructured.U
 
 		if deployment.Status.ObservedGeneration != watchedGeneration {
 			if w.recvEvent > 1 {
-				w.ev <- Event{
+				w.postEvent(ctx, Event{
 					State: deployState,
 					Ns:    ns,
 					Name:  name,
-				}
+				})
 			}
 		} else if deployment.Spec.Paused {
 			deployState = StateInterrupted
@@ -102,11 +109,11 @@ func (w *Watcher) watchDeploymentStatus(op *Operator, deployment *unstructured.U
 				deployState = StateDeploying
 
 				if w.recvEvent > 0 {
-					w.ev <- Event{
+					w.postEvent(ctx, Event{
 						State: StateDeploying,
 						Ns:    ns,
 						Name:  name,
-					}
+					})
 				}
 
 				fallthrough
@@ -117,11 +124,11 @@ func (w *Watcher) watchDeploymentStatus(op *Operator, deployment *unstructured.U
 				deployState = StateReplicasUpdated
 
 				if w.recvEvent > 1 {
-					w.ev <- Event{
+					w.postEvent(ctx, Event{
 						State: deployState,
 						Ns:    ns,
 						Name:  name,
-					}
+					})
 				}
 
 				fallthrough
@@ -138,18 +145,22 @@ func (w *Watcher) watchDeploymentStatus(op *Operator, deployment *unstructured.U
 		time.Sleep(w.checkInterval)
 	}
 
-	w.ev <- Event{
+	w.postEvent(ctx, Event{
 		State: deployState,
 		Ns:    ns,
 		Name:  name,
 		Err:   lastErr,
 		Done:  true,
-	}
+	})
+}
+
+func (w *Watcher) Events() <-chan Event {
+	return w.events
 }
 
 func NewWatcher(deployTimeout time.Duration, checkInterval time.Duration, recvEvent int) *Watcher {
 	return &Watcher{
-		ev:            make(chan Event, 16),
+		events:        make(chan Event, 16),
 		deployTimeout: deployTimeout,
 		checkInterval: checkInterval,
 		recvEvent:     recvEvent,
