@@ -8,7 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-type deploymentObject struct {
+type DeploymentObject struct {
 	Metadata struct {
 		Generation int64 `json:"generation"`
 	} `json:"metadata"`
@@ -42,17 +42,19 @@ const (
 )
 
 type Event struct {
-	State int
-	Ns    string
-	Name  string
-	Err   error
-	Done  bool
+	State      int
+	Ns         string
+	Name       string
+	Deployment *DeploymentObject
+	Err        error
+	Done       bool
 }
 
 type Watcher struct {
 	events        chan Event
 	deployTimeout time.Duration
 	checkInterval time.Duration
+	strict        bool
 	recvEvent     int
 }
 
@@ -69,7 +71,10 @@ func (w *Watcher) watchDeploymentStatus(op *Operator, deployment *unstructured.U
 	watchedGeneration := deployment.GetGeneration()
 	deployState := StatePending
 
-	var lastErr error
+	var (
+		lastErr        error
+		lastDeployment *DeploymentObject
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), w.deployTimeout)
 	defer cancel()
 	for {
@@ -79,7 +84,7 @@ func (w *Watcher) watchDeploymentStatus(op *Operator, deployment *unstructured.U
 			break
 		}
 
-		deployment, err := convertObjectToType[deploymentObject](obj)
+		deployment, err := convertObjectToType[DeploymentObject](obj)
 		if err != nil {
 			lastErr = err
 			break
@@ -93,9 +98,10 @@ func (w *Watcher) watchDeploymentStatus(op *Operator, deployment *unstructured.U
 		if deployment.Status.ObservedGeneration != watchedGeneration {
 			if w.recvEvent > 1 {
 				w.postEvent(ctx, Event{
-					State: deployState,
-					Ns:    ns,
-					Name:  name,
+					State:      deployState,
+					Ns:         ns,
+					Name:       name,
+					Deployment: deployment,
 				})
 			}
 		} else if deployment.Spec.Paused {
@@ -110,9 +116,10 @@ func (w *Watcher) watchDeploymentStatus(op *Operator, deployment *unstructured.U
 
 				if w.recvEvent > 0 {
 					w.postEvent(ctx, Event{
-						State: StateDeploying,
-						Ns:    ns,
-						Name:  name,
+						State:      StateDeploying,
+						Ns:         ns,
+						Name:       name,
+						Deployment: deployment,
 					})
 				}
 
@@ -125,16 +132,20 @@ func (w *Watcher) watchDeploymentStatus(op *Operator, deployment *unstructured.U
 
 				if w.recvEvent > 1 {
 					w.postEvent(ctx, Event{
-						State: deployState,
-						Ns:    ns,
-						Name:  name,
+						State:      deployState,
+						Ns:         ns,
+						Name:       name,
+						Deployment: deployment,
 					})
 				}
 
 				fallthrough
 			case StateReplicasUpdated:
 				if deployment.Status.ReadyReplicas == deployment.Spec.Replicas {
-					deployState = StateReplicasReady
+					if !w.strict || deployment.Status.Replicas == deployment.Spec.Replicas {
+						deployState = StateReplicasReady
+						lastDeployment = deployment
+					}
 				}
 			}
 		}
@@ -146,11 +157,12 @@ func (w *Watcher) watchDeploymentStatus(op *Operator, deployment *unstructured.U
 	}
 
 	w.postEvent(ctx, Event{
-		State: deployState,
-		Ns:    ns,
-		Name:  name,
-		Err:   lastErr,
-		Done:  true,
+		State:      deployState,
+		Ns:         ns,
+		Name:       name,
+		Deployment: lastDeployment,
+		Err:        lastErr,
+		Done:       true,
 	})
 }
 
@@ -158,11 +170,12 @@ func (w *Watcher) Events() <-chan Event {
 	return w.events
 }
 
-func NewWatcher(deployTimeout time.Duration, checkInterval time.Duration, recvEvent int) *Watcher {
+func NewWatcher(deployTimeout time.Duration, checkInterval time.Duration, strict bool, recvEvent int) *Watcher {
 	return &Watcher{
 		events:        make(chan Event, 16),
 		deployTimeout: deployTimeout,
 		checkInterval: checkInterval,
+		strict:        strict,
 		recvEvent:     recvEvent,
 	}
 }
